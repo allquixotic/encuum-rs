@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, sync::Arc, cell::RefCell};
 
 use crate::structures::*;
 use headless_chrome::{Browser, Element, Tab};
@@ -59,11 +59,14 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
     //Go through each forum and extract all the thread links
     let post_contents_rx = Regex::new(r"(?s)^\s*\[quote=@[0-9]+\]\s*(.*)\s*\[/quote\]\s*$").unwrap();
     for forum in retval.iter_mut() {
+        let forum_title = forum.base.title.clone();
 
         //Go to the forum's first page of the list of threads
         go(&tab, &forum.base.url)?;
 
-        let mut paged_loop = |extractor: &dyn Fn(u32, &mut Forum) -> Fallible| -> Fallible {
+        let forum_cell = RefCell::new(forum);
+
+        let paged_loop = |extractor: &dyn Fn(u32, &RefCell<&mut Forum>) -> Fallible| -> Fallible {
             let mut next_arrow: Option<Element> = None;
             let mut page_num: u32 = 1;
 
@@ -75,7 +78,7 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                 }
 
                 //Extract stuff from the paged thing (either a forum summary or a thread)
-                extractor(page_num, &mut forum)?;
+                extractor(page_num, &forum_cell)?;
 
                 //Loop Guard - stop when there are no more pages of the forum/thread.
                 next_arrow = match tab.wait_for_xpath_with_custom_timeout("//input[@class='right']", Duration::from_secs(30)) {
@@ -83,7 +86,7 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                     Err(_) => None,
                 };
                 if next_arrow.is_none() {
-                    println!("NOTE: Reached the last page (#{}) of forum/thread {}", page_num, forum.base.title);
+                    println!("NOTE: Reached the last page (#{}) of forum/thread {}", page_num, forum_title);
                     break;
                 }
                 page_num += 1;
@@ -108,16 +111,16 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                             println!("WARN: Forum thread {} has no href attribute", ft.base.title)
                         }
                     }
-                    forump.threads.push(ft);
+                    forump.borrow_mut().threads.push(ft);
                     
                 },
-                Err(e) => println!("NOTE: Forum {} has no thread links I can find on summary page {}. Error: {}", &forump.base.title, page_num, e)
+                Err(e) => println!("NOTE: Forum {} has no thread links I can find on summary page {}. Error: {}", forum_title, page_num, e)
             }
             Ok(())
         })?;
 
         //Depth first -- extract all forum posts on the current forum
-        for thread in forum.threads.iter_mut() {
+        for thread in forum_cell.borrow_mut().threads.iter_mut() {
 
             //Open a thread
             go(&tab, &thread.base.url)?;
@@ -130,8 +133,9 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                 thread.poster_name = usernames.first().unwrap().get_inner_text()?;
             }
 
+            let thread_cell = RefCell::new(thread);
             //Extract all the replies to the thread.
-            paged_loop(&|page_num, forump| {
+            paged_loop(&|_page_num, _forump| {
 
                 //We have to get all the user names of the posters on this page.
                 let mut user_name_strings: Vec<String> = vec!();
@@ -144,7 +148,7 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                 for (pos, quote) in quotes.iter().enumerate() {
                     let mut post = Post::default();
                     let rslt_text_area = tab.wait_for_xpath("//textarea[@id='content']");
-                    let mut text_area;
+                    let text_area;
                     match rslt_text_area {
                         Ok(e) => text_area = e,
                         Err(e) => {
@@ -181,8 +185,10 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
 
                     post.bbcode = bbcode.to_string();
                     post.url = tab.get_url();
-                    //Have to do some additional mutations here.
-                    thread.replies.push(post);
+                    post.poster_name = user_name_strings.get(pos).unwrap().to_string();
+                    post.post_sequence = pos as u64;
+                    println!("Post #{} scraped: name={}, url={}, bbcode(20)={}", post.post_sequence, post.poster_name, post.url, bbcode.clone().get(0..20).unwrap_or(&bbcode));
+                    thread_cell.borrow_mut().replies.push(post);
                 }
                 Ok(())
             })?;
