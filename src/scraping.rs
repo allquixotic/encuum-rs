@@ -131,7 +131,6 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
             }
 
             //Extract all the replies to the thread.
-            let mut post: Arc<Option<Post>> = Arc::new(None);
             paged_loop(&|page_num, forump| {
 
                 //We have to get all the user names of the posters on this page.
@@ -143,7 +142,7 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                 let quotes = tab.wait_for_elements_by_xpath("//div[contains(@class,'iconf-quote-right')]")?;
 
                 for (pos, quote) in quotes.iter().enumerate() {
-                    let mut ipost = Post::default();
+                    let mut post = Post::default();
                     let rslt_text_area = tab.wait_for_xpath("//textarea[@id='content']");
                     let mut text_area;
                     match rslt_text_area {
@@ -180,18 +179,13 @@ pub fn scrape(opts: ScrapeOpts) -> Result<Vec<Forum>, Box<dyn Error>> {
                         None => ""
                     };
 
-                    ipost.bbcode = bbcode.to_string();
-                    ipost.url = tab.get_url();
-                    post.replace(ipost);
+                    post.bbcode = bbcode.to_string();
+                    post.url = tab.get_url();
+                    //Have to do some additional mutations here.
+                    thread.replies.push(post);
                 }
                 Ok(())
             })?;
-
-            //XXX: An extra memory copy because we're using closures? Ugh.
-            match Option::as_ref(&post) {
-                Some(pst) => thread.replies.push(pst.clone()),
-                None => ()
-            };
         }
     }
 
